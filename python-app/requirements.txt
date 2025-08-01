@@ -1,0 +1,9 @@
+pyspark==3.5.1
+kafka-python
+findspark
+IPython
+pandas
+statsmodels
+sklearn
+pyarrow
+jpype1
