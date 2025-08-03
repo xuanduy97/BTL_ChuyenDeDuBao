@@ -1,7 +1,7 @@
 import os
 import sys
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, pandas_udf, lit
+from pyspark.sql.functions import col, from_json, pandas_udf, lit, when, isnan, isnull
 from pyspark.sql.types import StructType, DoubleType, IntegerType, StringType, StructField, BooleanType
 import pandas as pd
 import numpy as np
@@ -315,7 +315,8 @@ class HeartDiseaseKafkaSystem:
         self.topic_name = topic_name
         self.kafka_server = kafka_server
         self.spark = None
-        self.query = None
+        self.prediction_query = None
+        self.training_query = None
         
         # ML components
         self.preprocessor = DataPreprocessor()
@@ -391,87 +392,70 @@ class HeartDiseaseKafkaSystem:
         
         return parsed_df
     
-    def process_batch(self, df, epoch_id):
-        """Process each batch with prediction and retraining logic"""
+    def process_prediction_record(self, df, epoch_id):
+        """Process each record immediately for prediction (num=null records)"""
         if df.count() == 0:
-            print(f"\n=== Batch {epoch_id} ===")
-            print("Empty batch received")
             return
-        
-        total_count = df.count()
-        
-        # Separate null and non-null records
-        null_records = df.filter(col("num").isNull())
-        valid_records = df.filter(col("num").isNotNull())
-        
-        null_count = null_records.count()
-        valid_count = valid_records.count()
-        
-        print(f"\n=== Batch {epoch_id} ===")
-        print(f"📊 Total: {total_count} | Valid: {valid_count} | Null: {null_count}")
-        
-        # Process records with num=null for prediction
-        if null_count > 0:
-            self._process_prediction_records(null_records, null_count)
-        
-        # Accumulate valid records for retraining
-        if valid_count > 0:
-            self._process_training_records(valid_records, valid_count)
-        
-        print("-" * 60)
-    
-    def _process_prediction_records(self, null_records, null_count):
-        """Process records with num=null for prediction"""
-        print(f"\n🔮 PROCESSING {null_count} RECORDS FOR PREDICTION")
-        print("-" * 80)
+            
+        print(f"\n🔮 PREDICTION BATCH {epoch_id} - Processing {df.count()} records")
+        print("=" * 80)
         
         if not self.predictor.is_trained:
             print("⚠️ Model not trained yet. Cannot make predictions.")
             print("💡 Waiting for training data (records with num≠null)...")
             print(f"   Need {self.retrain_batch_size} valid records to create initial model")
             print(f"   Currently have: {len(self.accumulated_valid_records)} valid records")
-            
-            # Show what we're waiting for
-            if len(self.accumulated_valid_records) > 0:
-                print("📋 Accumulated training records so far:")
-                for i, row in enumerate(self.accumulated_valid_records):
-                    row_dict = row.asDict() if hasattr(row, 'asDict') else row
-                    print(f"   {i+1}. ID: {row_dict.get('id', 'N/A')}, Age: {row_dict.get('age', 'N/A')}, Target: {row_dict.get('num', 'N/A')}")
-            
             return
         
-        try:
-            for i, row in enumerate(null_records.collect()):
-                row_dict = row.asDict()
-                patient_id = row_dict.get('id', f'unknown_{i}')
+        # Process each record individually for immediate prediction
+        records = df.collect()
+        for i, row in enumerate(records):
+            row_dict = row.asDict()
+            patient_id = row_dict.get('id', f'unknown_{i}')
+            
+            print(f"\n🔍 IMMEDIATE PREDICTION for Patient ID: {patient_id}")
+            print(f"📋 Patient Data: Age={row_dict.get('age')}, Sex={row_dict.get('sex')}, CP={row_dict.get('cp')}")
+            
+            # Make immediate prediction
+            result = self.predictor.predict_single_patient(row_dict, self.preprocessor)
+            
+            if result:
+                prediction_text = "Heart Disease" if result['prediction'] == 1 else "No Heart Disease"
+                risk_emoji = "🔴" if result['risk_level'] == 'High' else "🟡" if result['risk_level'] == 'Medium' else "🟢"
                 
-                print(f"\n🔍 Predicting for Patient ID: {patient_id}")
+                print(f"   ✅ Prediction: {prediction_text}")
+                print(f"   📊 Disease Probability: {result['probability_disease']:.4f}")
+                print(f"   {risk_emoji} Risk Level: {result['risk_level']}")
                 
-                # Make prediction
-                result = self.predictor.predict_single_patient(row_dict, self.preprocessor)
-                
-                if result:
-                    prediction_text = "Heart Disease" if result['prediction'] == 1 else "No Heart Disease"
-                    print(f"   ✅ Prediction: {prediction_text}")
-                    print(f"   📊 Disease Probability: {result['probability_disease']:.4f}")
-                    print(f"   ⚡ Risk Level: {result['risk_level']}")
-                else:
-                    print(f"   ❌ Prediction failed for Patient ID: {patient_id}")
+                # Log detailed result for monitoring
+                print(f"   📈 Full Probabilities: No Disease={result['probability_no_disease']:.4f}, Disease={result['probability_disease']:.4f}")
+            else:
+                print(f"   ❌ Prediction failed for Patient ID: {patient_id}")
+            
+            print("-" * 50)
         
-        except Exception as e:
-            print(f"❌ Error in prediction processing: {e}")
-        
-        print("-" * 80)
+        print("=" * 80)
     
-    def _process_training_records(self, valid_records, valid_count):
-        """Process valid records for training/retraining"""
-        print(f"\n📚 PROCESSING {valid_count} VALID RECORDS FOR TRAINING")
+    def process_training_batch(self, df, epoch_id):
+        """Process valid records for training/retraining (num≠null records)"""
+        if df.count() == 0:
+            return
+        
+        valid_count = df.count()
+        print(f"\n📚 TRAINING BATCH {epoch_id} - Processing {valid_count} valid records")
+        print("=" * 80)
         
         # Add to accumulated records
-        current_valid = valid_records.collect()
+        current_valid = df.collect()
         self.accumulated_valid_records.extend(current_valid)
         
         print(f"✅ Accumulated valid records: {len(self.accumulated_valid_records)}")
+        
+        # Show recent records
+        print("📋 Recent training records:")
+        for i, row in enumerate(current_valid[-3:]):  # Show last 3 from current batch
+            row_dict = row.asDict() if hasattr(row, 'asDict') else row
+            print(f"   {i+1}. ID: {row_dict.get('id', 'N/A')}, Age: {row_dict.get('age', 'N/A')}, Target: {row_dict.get('num', 'N/A')}")
         
         # Check if we have enough records for training/retraining
         if len(self.accumulated_valid_records) >= self.retrain_batch_size:
@@ -529,11 +513,10 @@ class HeartDiseaseKafkaSystem:
             print("=" * 100)
         else:
             model_status = "✅ Model ready" if self.predictor.is_trained else "❌ No model yet"
-            print(f"⏳ Need {self.retrain_batch_size} records for {'retraining' if self.predictor.is_trained else 'initial training'}, currently have {len(self.accumulated_valid_records)} ({model_status})")
-            print("📋 Current accumulated records:")
-            for i, row in enumerate(self.accumulated_valid_records[-5:]):  # Show last 5
-                row_dict = row.asDict() if hasattr(row, 'asDict') else row
-                print(f"   {i+1}. ID: {row_dict.get('id', 'N/A')}, Age: {row_dict.get('age', 'N/A')}, Num: {row_dict.get('num', 'N/A')}")
+            remaining_needed = self.retrain_batch_size - len(self.accumulated_valid_records)
+            print(f"⏳ Need {remaining_needed} more records for {'retraining' if self.predictor.is_trained else 'initial training'} ({model_status})")
+        
+        print("=" * 80)
     
     def initial_training(self, training_data_path):
         """Initial training with a dataset"""
@@ -573,8 +556,8 @@ class HeartDiseaseKafkaSystem:
         print("✅ Initial training completed!")
         return True
     
-    def start_stream(self, processing_time="5 seconds"):
-        """Start Kafka stream processing"""
+    def start_dual_streams(self, processing_time="3 seconds"):
+        """Start separate streams for prediction and training"""
         if not self.spark:
             raise Exception("Spark session not created. Call create_spark_session() first.")
         
@@ -584,28 +567,60 @@ class HeartDiseaseKafkaSystem:
         # Parse data
         parsed_df = self.parse_data(kafka_df)
         
-        # Start stream
-        self.query = parsed_df.writeStream \
+        # Create separate streams for prediction (num=null) and training (num≠null)
+        prediction_df = parsed_df.filter(col("num").isNull())
+        training_df = parsed_df.filter(col("num").isNotNull())
+        
+        # Start prediction stream (immediate processing)
+        self.prediction_query = prediction_df.writeStream \
             .outputMode("append") \
-            .option("checkpointLocation", "checkpoint/heart_disease_kafka/") \
+            .option("checkpointLocation", "checkpoint/prediction_stream/") \
             .trigger(processingTime=processing_time) \
-            .foreachBatch(self.process_batch) \
+            .foreachBatch(self.process_prediction_record) \
             .start()
         
-        print("✓ Kafka stream started")
-        print("🔄 Processing: Prediction for num=null, Retraining for valid num")
-        return self.query
+        # Start training stream (batch processing)
+        self.training_query = training_df.writeStream \
+            .outputMode("append") \
+            .option("checkpointLocation", "checkpoint/training_stream/") \
+            .trigger(processingTime="10 seconds") \
+            .foreachBatch(self.process_training_batch) \
+            .start()
+        
+        print("✓ Dual Kafka streams started")
+        print("🔮 Prediction stream: Immediate processing (3s trigger)")
+        print("📚 Training stream: Batch processing (10s trigger)")
+        return self.prediction_query, self.training_query
+    
+    def start_stream(self, processing_time="3 seconds"):
+        """Start unified stream (kept for backward compatibility)"""
+        return self.start_dual_streams(processing_time)
     
     def wait_for_termination(self):
         """Wait for stream termination"""
-        if self.query:
-            self.query.awaitTermination()
+        if self.prediction_query and self.training_query:
+            # Wait for both streams
+            try:
+                self.prediction_query.awaitTermination()
+            except:
+                pass
+            try:
+                self.training_query.awaitTermination()
+            except:
+                pass
+        elif self.prediction_query:
+            self.prediction_query.awaitTermination()
+        elif self.training_query:
+            self.training_query.awaitTermination()
     
     def stop_stream(self):
-        """Stop stream"""
-        if self.query:
-            self.query.stop()
-            print("✓ Stream stopped")
+        """Stop streams"""
+        if self.prediction_query:
+            self.prediction_query.stop()
+            print("✓ Prediction stream stopped")
+        if self.training_query:
+            self.training_query.stop()
+            print("✓ Training stream stopped")
     
     def stop_spark(self):
         """Stop Spark session"""
@@ -809,7 +824,7 @@ def main():
     system = None
     
     try:
-        print("🚀 Starting Heart Disease Kafka ML System...")
+        print("🚀 Starting Heart Disease Real-time Kafka ML System...")
         
         # Create system instance
         system = HeartDiseaseKafkaSystem(
@@ -831,15 +846,19 @@ def main():
             # Example: Uncomment the following line and provide your training data path
             # system.initial_training('data/heart_disease_train.csv')
         
-        # Start stream processing
-        system.start_stream(processing_time="10 seconds")
+        # Start dual stream processing
+        system.start_dual_streams(processing_time="3 seconds")
         
         print("\n📊 System Status:")
         print(f"   🤖 Model trained: {system.predictor.is_trained}")
         print(f"   📚 Retrain batch size: {system.retrain_batch_size}")
         print(f"   🔄 Processing logic:")
-        print(f"      • num=null → Prediction")
-        print(f"      • num≠null → Accumulate for retraining")
+        print(f"      • num=null → IMMEDIATE Prediction (3s trigger)")
+        print(f"      • num≠null → Batch Training (10s trigger)")
+        print("\n💡 Real-time Features:")
+        print("   ⚡ Predictions are made instantly when num=null records arrive")
+        print("   📈 Training data is accumulated and processed in batches")
+        print("   🔄 Separate streams ensure prediction latency is minimized")
         print("\n💡 Press Ctrl+C to stop...")
         print("-" * 60)
         
