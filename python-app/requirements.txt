@@ -7,3 +7,5 @@ statsmodels
 sklearn
 pyarrow
 jpype1
+matplotlib
+seaborn
