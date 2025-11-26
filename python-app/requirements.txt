@@ -4,7 +4,7 @@ findspark
 IPython
 pandas
 statsmodels
-sklearn
+scikit-learn
 pyarrow
 jpype1
 matplotlib

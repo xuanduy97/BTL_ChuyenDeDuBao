@@ -48,17 +48,3 @@ services:
     command: tail -f /dev/null
     tty: true
     stdin_open: true
-
-  # Jupyter Notebook
-  jupyter:
-    image: jupyter/pyspark-notebook
-    container_name: jupyter
-    ports:
-      - "8888:8888"
-    volumes:
-      - ./notebooks:/home/jovyan/work
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-    depends_on:
-      - kafka
-      - spark

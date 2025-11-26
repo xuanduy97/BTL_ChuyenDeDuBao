@@ -1,4 +1,9 @@
-FROM openjdk:17-slim
+FROM eclipse-temurin:17-jdk
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv
+
+# tạo venv
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # ========== 1. Cài Python, pip và các công cụ cần thiết ==========
 RUN apt-get update && \
