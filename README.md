@@ -7,7 +7,6 @@ Phân tích và dự báo dữ liệu học sâu
 
 - Các bước thực hiện
     + Build môi trường trên docker, mở terminal và chạy lệnh
-        . docker-compose build
         . docker-compose up -d
     + Sau khi đã khởi tạo môi trường xong
         . Khởi tạo topic để truyền dữ liệu, mở terminal và chạy lệnh:
