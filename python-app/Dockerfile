@@ -27,7 +27,10 @@ ENV PYSPARK_DRIVER_PYTHON=python3
 
 # ========== 4. Cài thư viện Python ==========
 COPY requirements.txt /tmp/
-RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+RUN pip3 install --upgrade pip && \
+    pip3 config set global.timeout 1200 && \
+    pip3 config set global.retries 20 && \
+    pip3 install --no-cache-dir --default-timeout=1200 -r /tmp/requirements.txt
 
 # ========== 5. Copy mã nguồn vào container ==========
 WORKDIR /app

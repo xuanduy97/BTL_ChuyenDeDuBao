@@ -9,3 +9,4 @@ pyarrow
 jpype1
 matplotlib
 seaborn
+tensorflow
